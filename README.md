@@ -1,0 +1,101 @@
+# Enterprise Knowledge Assistant (RAG)
+
+> Ask questions about your company's PDF documents and get answers **with cited sources**.
+
+![status](https://img.shields.io/badge/status-in%20progress-orange)
+![python](https://img.shields.io/badge/python-3.11-blue)
+
+Built by **[Rania Bentatou](https://github.com/rnnttou)**.
+
+---
+
+## What it does
+
+1. **Upload PDFs** (policies, manuals, reports…)
+2. **Split** them into small chunks of text
+3. **Embed** each chunk with Google Gemini (free tier), turning text into vectors
+4. **Store** the vectors in ChromaDB
+5. **Answer questions**: find the most relevant chunks, then let Gemini write an answer that cites which document and page each fact came from
+
+```
+PDF ──► chunks ──► embeddings ──► ChromaDB
+                                      │
+question ──► hybrid search (BM25 + vectors) ──► top chunks ──► Gemini ──► answer + sources
+```
+
+## Tech stack
+
+| Layer            | Tool                          |
+|------------------|-------------------------------|
+| LLM + embeddings | Google Gemini API (free tier) |
+| Vector store     | ChromaDB                      |
+| Keyword search   | BM25 (`rank-bm25`)            |
+| API              | FastAPI                       |
+| UI               | Streamlit                     |
+| Packaging        | Docker / docker compose       |
+| Tests            | pytest                        |
+
+## Roadmap
+
+- [x] **Step 1**: project skeleton and configuration
+- [ ] **Step 2**: load PDFs and split them into chunks
+- [ ] **Step 3**: embeddings with Gemini, stored in ChromaDB
+- [ ] **Step 4**: question answering with cited sources
+- [ ] **Step 5**: FastAPI backend
+- [ ] **Step 6**: Streamlit UI
+- [ ] **Step 7**: hybrid retrieval (BM25 + vector search)
+- [ ] **Step 8**: conversation memory
+- [ ] **Step 9**: Docker packaging
+- [ ] **Step 10**: evaluation on 30–50 test questions (retrieval hit rate + latency)
+
+## Getting started
+
+### 1. Clone and create a virtual environment
+
+```bash
+git clone https://github.com/rnnttou/enterprise-knowledge-assistant.git
+cd enterprise-knowledge-assistant
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2. Add your Gemini API key
+
+Get a free key at <https://aistudio.google.com/apikey>, then:
+
+```bash
+cp .env.example .env      # Windows: copy .env.example .env
+```
+
+Open `.env` and paste your key after `GEMINI_API_KEY=`.
+
+### 3. Check the setup
+
+```bash
+python -m app.config
+```
+
+## Project structure
+
+```
+enterprise-knowledge-assistant/
+├── app/            # application code
+│   └── config.py   # settings loaded from .env
+├── data/           # put your PDFs here (not committed)
+├── tests/          # unit tests and evaluation questions
+├── .env.example    # template for secrets
+├── requirements.txt
+└── README.md
+```
+
+## Evaluation
+
+*Coming in Step 10:* results on 30–50 hand-written questions, showing how often the correct passage appears in the top-k results and the average answer latency.
+
+## License
+
+MIT
