@@ -40,7 +40,7 @@ question ──► hybrid search (BM25 + vectors) ──► top chunks ──►
 - [x] **Step 1**: project skeleton and configuration
 - [x] **Step 2**: load PDFs and split them into chunks
 - [x] **Step 3**: embeddings with Gemini, stored in ChromaDB
-- [ ] **Step 4**: question answering with cited sources
+- [x] **Step 4**: question answering with cited sources
 - [ ] **Step 5**: FastAPI backend
 - [ ] **Step 6**: Streamlit UI
 - [ ] **Step 7**: hybrid retrieval (BM25 + vector search)
@@ -98,7 +98,16 @@ python -m app.vector_store --query "How many vacation days do employees get?"
 python -m app.vector_store --query "salary bands" --groups hr
 ```
 
-### 5. Run the tests
+### 5. Ask a question
+
+```bash
+python -m app.qa "How many vacation days do employees get?"
+python -m app.qa "salary bands" --groups hr
+```
+
+The chat model only sees the retrieved excerpts (never the full corpus), answers from them alone, and cites which excerpt each fact came from. Answers print alongside the source document and page for each excerpt used.
+
+### 6. Run the tests
 
 ```bash
 pytest
@@ -114,7 +123,8 @@ enterprise-knowledge-assistant/
 │   ├── config.py       # settings loaded from .env
 │   ├── chunking.py     # PDF loading and splitting (Step 2)
 │   ├── embeddings.py   # Gemini embeddings (Step 3)
-│   └── vector_store.py # ChromaDB indexing and search (Step 3)
+│   ├── vector_store.py # ChromaDB indexing and search (Step 3)
+│   └── qa.py           # question answering with cited sources (Step 4)
 ├── chroma_db/          # the vector index (created on first run, not committed)
 ├── data/               # put your PDFs here (not committed)
 ├── tests/              # unit tests and evaluation questions

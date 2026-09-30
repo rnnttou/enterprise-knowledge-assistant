@@ -17,7 +17,7 @@ CHROMA_DIR = PROJECT_ROOT / "chroma_db"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-2.5-flash")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-flash-latest")
 
 # Embeddings (used in Step 3). 768 dimensions keeps the index small with
 # little quality loss; changing it means re-embedding into a new collection.
