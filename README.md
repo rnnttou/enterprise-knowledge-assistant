@@ -38,8 +38,8 @@ question ──► hybrid search (BM25 + vectors) ──► top chunks ──►
 ## Roadmap
 
 - [x] **Step 1**: project skeleton and configuration
-- [ ] **Step 2**: load PDFs and split them into chunks
-- [ ] **Step 3**: embeddings with Gemini, stored in ChromaDB
+- [x] **Step 2**: load PDFs and split them into chunks
+- [x] **Step 3**: embeddings with Gemini, stored in ChromaDB
 - [ ] **Step 4**: question answering with cited sources
 - [ ] **Step 5**: FastAPI backend
 - [ ] **Step 6**: Streamlit UI
@@ -79,15 +79,46 @@ Open `.env` and paste your key after `GEMINI_API_KEY=`.
 python -m app.config
 ```
 
+### 4. Index your PDFs
+
+Put PDFs in `data/`, then embed them into ChromaDB (stored in `chroma_db/`):
+
+```bash
+python -m app.vector_store
+```
+
+Re-running is cheap: unchanged files are skipped, changed files have their chunks replaced, and deleted files are removed from the index. The free Gemini tier is rate-limited, so the first run pauses and retries when it hits the limit.
+
+PDFs in a sub-folder are only visible to that group: `data/hr/salaries.pdf` can be read by `hr`, while files directly in `data/` are public.
+
+Try a search:
+
+```bash
+python -m app.vector_store --query "How many vacation days do employees get?"
+python -m app.vector_store --query "salary bands" --groups hr
+```
+
+### 5. Run the tests
+
+```bash
+pytest
+```
+
+The tests use a fake embedder, so they run offline and don't use your API quota.
+
 ## Project structure
 
 ```
 enterprise-knowledge-assistant/
-├── app/            # application code
-│   └── config.py   # settings loaded from .env
-├── data/           # put your PDFs here (not committed)
-├── tests/          # unit tests and evaluation questions
-├── .env.example    # template for secrets
+├── app/                # application code
+│   ├── config.py       # settings loaded from .env
+│   ├── chunking.py     # PDF loading and splitting (Step 2)
+│   ├── embeddings.py   # Gemini embeddings (Step 3)
+│   └── vector_store.py # ChromaDB indexing and search (Step 3)
+├── chroma_db/          # the vector index (created on first run, not committed)
+├── data/               # put your PDFs here (not committed)
+├── tests/              # unit tests and evaluation questions
+├── .env.example        # template for secrets
 ├── requirements.txt
 └── README.md
 ```

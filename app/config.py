@@ -19,6 +19,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-2.5-flash")
 
+# Embeddings (used in Step 3). 768 dimensions keeps the index small with
+# little quality loss; changing it means re-embedding into a new collection.
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
+EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "50"))   # texts per API call
+
 # How we cut documents into pieces (used in Step 2)
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))        # characters per chunk
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))   # characters shared between neighbours
@@ -28,5 +33,6 @@ if __name__ == "__main__":
     # Quick sanity check: python -m app.config
     print(f"Data folder:     {DATA_DIR}")
     print(f"Embedding model: {EMBEDDING_MODEL}")
+    print(f"Embedding dim:   {EMBEDDING_DIM}")
     print(f"Chat model:      {CHAT_MODEL}")
     print(f"API key set:     {'yes' if GEMINI_API_KEY else 'NO - add it to .env'}")
