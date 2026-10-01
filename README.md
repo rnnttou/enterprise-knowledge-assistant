@@ -122,7 +122,9 @@ curl -X POST http://127.0.0.1:8000/ask -H "Content-Type: application/json" \
 curl -X POST http://127.0.0.1:8000/index
 ```
 
-`/ask` runs the same retrieval + citation pipeline as `python -m app.qa`. `/index` re-runs the indexer, so new PDFs dropped into `data/` can be picked up without a server restart.
+`/ask` runs the same retrieval + citation pipeline as `python -m app.qa` and returns
+`{"answer": ..., "citations": [{"marker", "source", "page", "snippet"}], "refused": ...}`.
+`refused` is `true` when the documents don't contain the answer. `/index` re-runs the indexer, so new PDFs dropped into `data/` can be picked up without a server restart.
 
 ### 7. Run the tests
 

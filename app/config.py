@@ -28,6 +28,12 @@ EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "50"))   # texts per API ca
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))        # characters per chunk
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))   # characters shared between neighbours
 
+# Question answering (used in Step 4). Search returns a cosine distance per
+# chunk: 0 = same meaning, higher = less related. If even the best chunk is
+# further away than this, we refuse instead of asking the model. 0.45 sits
+# between on-topic questions (~0.25-0.35) and off-topic ones (~0.5) on our PDFs.
+MAX_DISTANCE = float(os.getenv("MAX_DISTANCE", "0.45"))
+
 
 if __name__ == "__main__":
     # Quick sanity check: python -m app.config

@@ -7,7 +7,7 @@ Run with:
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from app.qa import ask as ask_question
+from app.qa import answer as answer_question
 from app.vector_store import get_collection, index_documents
 
 app = FastAPI(title="Enterprise Knowledge Assistant", version="0.1.0")
@@ -19,16 +19,17 @@ class AskRequest(BaseModel):
     k: int = Field(default=5, ge=1, le=20)
 
 
-class Source(BaseModel):
-    title: str
-    source: str
+class Citation(BaseModel):
+    marker: int      # the [n] used in the answer text
+    source: str      # file path inside data/, e.g. "employee-handbook.pdf"
     page: int
-    distance: float
+    snippet: str     # start of the cited chunk, so the user can check it
 
 
 class AskResponse(BaseModel):
     answer: str
-    sources: list[Source]
+    citations: list[Citation]
+    refused: bool    # True when the documents don't contain the answer
 
 
 class IndexResponse(BaseModel):
@@ -42,7 +43,7 @@ class IndexResponse(BaseModel):
 # Indirection so tests can swap in fakes with app.dependency_overrides,
 # instead of hitting Gemini and a real ChromaDB on every request.
 def get_ask():
-    return ask_question
+    return answer_question
 
 
 def get_indexer():
@@ -67,11 +68,8 @@ def ask(request: AskRequest, ask_fn=Depends(get_ask)) -> AskResponse:
         result = ask_fn(request.question, request.groups, request.k)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    sources = [
-        Source(title=hit["title"], source=hit["source"], page=hit["page"], distance=hit["distance"])
-        for hit in result.sources
-    ]
-    return AskResponse(answer=result.text, sources=sources)
+    # answer() already returns {"answer", "citations", "refused"}, matching AskResponse.
+    return AskResponse(**result)
 
 
 @app.post("/index", response_model=IndexResponse)

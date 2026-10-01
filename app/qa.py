@@ -5,30 +5,39 @@ the whole corpus, and is instructed to answer from them alone and cite the
 excerpt number(s) it used. That keeps answers checkable against a page and
 makes "I don't know" the expected response when nothing relevant is found.
 
+The main entry point is answer(), which returns a plain dict:
+    {"answer": str, "citations": [{marker, source, page, snippet}], "refused": bool}
+
 Usage:
     python -m app.qa "How many vacation days do employees get?"
     python -m app.qa "salary bands" --groups hr
 """
 
 import argparse
+import re
 import time
 from dataclasses import dataclass, field
 
 from google import genai
 from google.genai import errors, types
 
-from app.config import CHAT_MODEL, GEMINI_API_KEY
+from app.config import CHAT_MODEL, GEMINI_API_KEY, MAX_DISTANCE
 from app.vector_store import get_collection, search
 
 SYSTEM_PROMPT = (
-    "You are a helpful assistant answering questions using only the numbered "
-    "excerpts below. Cite the excerpt number(s) you used in square brackets, "
-    "e.g. [1] or [2][3], right after each fact they support. If the excerpts "
-    "don't contain the answer, say so instead of guessing."
+    "You are a helpful assistant answering questions using ONLY the numbered "
+    "excerpts below. Do not use outside knowledge. After each fact, cite the "
+    "excerpt number(s) it came from in square brackets, e.g. [1] or [2][3]. "
+    "If the excerpts don't contain the answer, say so instead of guessing."
 )
 
 MAX_RETRIES = 6
+SNIPPET_CHARS = 200   # how much of each cited chunk to show the user
 NO_RESULTS_MESSAGE = "I couldn't find anything relevant in the indexed documents."
+REFUSAL_MESSAGE = "I couldn't find this in the documents."
+
+# Matches citation markers like "[3]" or "[1, 2]" in the model's answer.
+CITATION_PATTERN = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
 @dataclass
@@ -38,11 +47,36 @@ class Answer:
 
 
 def build_context(hits: list[dict]) -> str:
-    """Numbered excerpts the model can cite by index, e.g. "[1] Handbook, p. 3"."""
+    """Numbered excerpts the model can cite, e.g. "[1] handbook.pdf, p. 3: ..."."""
     return "\n\n".join(
-        f"[{i}] {hit['title']}, p. {hit['page']}\n{hit['text']}"
+        f"[{i}] {hit['source']}, p. {hit['page']}: {hit['text']}"
         for i, hit in enumerate(hits, start=1)
     )
+
+
+def clean_citations(text: str, num_sources: int) -> tuple[str, list[int]]:
+    """Drop citation markers that don't point at a chunk we actually sent.
+
+    The model sometimes invents a marker like [7] when only 5 excerpts exist.
+    We remove those so every citation the user sees is real, and return the
+    valid marker numbers in order, e.g. ("... [1][3]", [1, 3]).
+    """
+    used: list[int] = []
+
+    def fix(match: re.Match) -> str:
+        numbers = [int(n) for n in match.group(1).split(",")]
+        valid = [n for n in numbers if 1 <= n <= num_sources]
+        for n in valid:
+            if n not in used:
+                used.append(n)
+        # "[1, 9]" becomes "[1]"; "[9]" disappears entirely.
+        return "".join(f"[{n}]" for n in valid)
+
+    cleaned = CITATION_PATTERN.sub(fix, text)
+    # Tidy the gaps left by removed markers: "days ." -> "days." and double spaces.
+    cleaned = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip(), used
 
 
 class GeminiAnswerer:
@@ -86,6 +120,49 @@ def ask(question: str, groups: list[str] | None = None, k: int = 5, *, collectio
     return Answer(text=text, sources=hits)
 
 
+def answer(question: str, groups: list[str] | None = None, k: int = 5, *, collection=None, embedder=None, answerer=None) -> dict:
+    """Answer a question from the documents the user's groups may read.
+
+    Returns {"answer": str, "citations": [...], "refused": bool}. Each citation is
+    {"marker": 1, "source": "employee-handbook.pdf", "page": 18, "snippet": "..."}.
+    The keyword arguments let tests pass fakes instead of Gemini and ChromaDB.
+    """
+    from app.embeddings import GeminiEmbedder
+
+    collection = collection or get_collection()
+    embedder = embedder or GeminiEmbedder()
+
+    # 1. Retrieve the top-k chunks, already filtered by the user's access groups.
+    hits = search(collection, embedder, question, groups, k)
+
+    # 2. If even the closest chunk is far away, the documents probably don't
+    #    cover this question. Refuse without spending a chat-model call.
+    if not hits or hits[0]["distance"] > MAX_DISTANCE:
+        return {"answer": REFUSAL_MESSAGE, "citations": [], "refused": True}
+
+    # 3. Ask the model, giving it only these numbered chunks.
+    answerer = answerer or GeminiAnswerer()
+    raw_text = answerer.answer(question, hits)
+
+    # 4. Remove any [n] that doesn't match a chunk we sent.
+    text, markers = clean_citations(raw_text, len(hits))
+
+    # 5. Turn each valid marker back into its source, page and a short snippet.
+    citations = [
+        {
+            "marker": n,
+            "source": hits[n - 1]["source"],
+            "page": hits[n - 1]["page"],
+            "snippet": hits[n - 1]["text"][:SNIPPET_CHARS],
+        }
+        for n in sorted(markers)
+    ]
+
+    # An answer with no valid citation isn't grounded in the documents
+    # (usually the model saying "the excerpts don't say"), so flag it as refused.
+    return {"answer": text, "citations": citations, "refused": not citations}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ask a question about the indexed documents.")
     parser.add_argument("question")
@@ -94,13 +171,14 @@ def main() -> None:
     args = parser.parse_args()
 
     groups = [g.strip() for g in args.groups.split(",") if g.strip()]
-    result = ask(args.question, groups, args.k)
+    result = answer(args.question, groups, args.k)
 
-    print(result.text)
-    if result.sources:
+    print(result["answer"])
+    if result["citations"]:
         print("\nSources:")
-        for i, hit in enumerate(result.sources, start=1):
-            print(f"  [{i}] {hit['title']}, p. {hit['page']} ({hit['source']})")
+        for c in result["citations"]:
+            snippet = c["snippet"].replace("\n", " ")
+            print(f"  [{c['marker']}] {c['source']}, p. {c['page']}: {snippet}...")
 
 
 if __name__ == "__main__":

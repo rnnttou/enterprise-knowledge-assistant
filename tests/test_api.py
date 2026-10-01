@@ -4,7 +4,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api import app, get_ask, get_indexer
-from app.qa import Answer
 
 
 @pytest.fixture
@@ -29,10 +28,11 @@ def test_ask_returns_answer_and_sources(client):
         assert question == "How many vacation days?"
         assert groups == ["hr"]
         assert k == 3
-        return Answer(
-            text="Employees get 25 days [1].",
-            sources=[{"title": "Handbook", "source": "handbook.pdf", "page": 18, "distance": 0.12}],
-        )
+        return {
+            "answer": "Employees get 25 days [1].",
+            "citations": [{"marker": 1, "source": "handbook.pdf", "page": 18, "snippet": "Employees get 25 days."}],
+            "refused": False,
+        }
 
     app.dependency_overrides[get_ask] = lambda: fake_ask
 
@@ -41,7 +41,21 @@ def test_ask_returns_answer_and_sources(client):
     assert response.status_code == 200
     body = response.json()
     assert body["answer"] == "Employees get 25 days [1]."
-    assert body["sources"] == [{"title": "Handbook", "source": "handbook.pdf", "page": 18, "distance": 0.12}]
+    assert body["citations"] == [{"marker": 1, "source": "handbook.pdf", "page": 18, "snippet": "Employees get 25 days."}]
+    assert body["refused"] is False
+
+
+def test_ask_passes_refusal_through(client):
+    app.dependency_overrides[get_ask] = lambda: lambda question, groups, k: {
+        "answer": "I couldn't find this in the documents.",
+        "citations": [],
+        "refused": True,
+    }
+
+    response = client.post("/ask", json={"question": "chocolate cake recipe?"})
+
+    assert response.status_code == 200
+    assert response.json() == {"answer": "I couldn't find this in the documents.", "citations": [], "refused": True}
 
 
 def test_ask_defaults_groups_and_k(client):
@@ -50,7 +64,7 @@ def test_ask_defaults_groups_and_k(client):
     def fake_ask(question, groups, k):
         captured["groups"] = groups
         captured["k"] = k
-        return Answer(text="ok", sources=[])
+        return {"answer": "ok", "citations": [], "refused": False}
 
     app.dependency_overrides[get_ask] = lambda: fake_ask
 
