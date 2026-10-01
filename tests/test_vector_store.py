@@ -9,7 +9,14 @@ import pytest
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from app.vector_store import get_collection, index_documents, search
+from app.vector_store import (
+    bm25_search,
+    get_collection,
+    hybrid_search,
+    index_documents,
+    reciprocal_rank_fusion,
+    search,
+)
 
 
 class FakeEmbedder:
@@ -118,6 +125,74 @@ def test_search_hides_documents_outside_the_users_groups(collection, data_dir):
 
     public_hits = search(collection, FakeEmbedder(), "salary", groups=[], k=10)
     hr_hits = search(collection, FakeEmbedder(), "salary", groups=["hr"], k=10)
+
+    assert {h["source"] for h in public_hits} == {"handbook.pdf"}
+    assert {h["source"] for h in hr_hits} == {"handbook.pdf", "hr/salaries.pdf"}
+
+
+# --- Step 7: hybrid retrieval (BM25 + vector) ------------------------------
+
+
+def test_bm25_search_ranks_by_keyword_overlap(collection, tmp_path):
+    # BM25's idf is 0 when a term appears in exactly half the corpus, so this
+    # needs more than two candidate chunks to produce a meaningful ranking.
+    write_pdf(tmp_path / "handbook.pdf", [
+        "Holiday policy page one",
+        "Remote work page two",
+        "Benefits overview page three",
+        "Office supplies page four",
+    ])
+    index_documents(collection, FakeEmbedder(), tmp_path)
+
+    hits = bm25_search(collection, "remote work", groups=[], k=5)
+
+    assert "remote" in hits[0]["text"].lower()
+
+
+def test_bm25_search_hides_documents_outside_the_users_groups(collection, data_dir):
+    index_documents(collection, FakeEmbedder(), data_dir)
+
+    public_hits = bm25_search(collection, "salary bands", groups=[], k=10)
+    hr_hits = bm25_search(collection, "salary bands", groups=["hr"], k=10)
+
+    assert {h["source"] for h in public_hits} == {"handbook.pdf"}
+    assert {h["source"] for h in hr_hits} == {"handbook.pdf", "hr/salaries.pdf"}
+
+
+def test_bm25_search_on_empty_collection_returns_nothing(collection):
+    assert bm25_search(collection, "anything", groups=[], k=5) == []
+
+
+def test_reciprocal_rank_fusion_rewards_ids_ranked_highly_in_both_lists():
+    scores = reciprocal_rank_fusion([["a", "b", "c"], ["b", "a", "c"]])
+
+    assert scores["a"] > scores["c"]
+    assert scores["b"] > scores["c"]
+    # "a" and "b" each take first place once, so they score equally.
+    assert scores["a"] == scores["b"]
+
+
+def test_reciprocal_rank_fusion_includes_ids_only_seen_in_one_list():
+    scores = reciprocal_rank_fusion([["a"], ["b"]])
+
+    assert set(scores) == {"a", "b"}
+
+
+def test_hybrid_search_merges_vector_and_keyword_rankings(collection, data_dir):
+    index_documents(collection, FakeEmbedder(), data_dir)
+
+    hits = hybrid_search(collection, FakeEmbedder(), "remote work", groups=[], k=5)
+
+    assert any(h["source"] == "handbook.pdf" for h in hits)
+    # Every hit must carry a distance, even one surfaced only by BM25.
+    assert all("distance" in h for h in hits)
+
+
+def test_hybrid_search_hides_documents_outside_the_users_groups(collection, data_dir):
+    index_documents(collection, FakeEmbedder(), data_dir)
+
+    public_hits = hybrid_search(collection, FakeEmbedder(), "salary bands", groups=[], k=10)
+    hr_hits = hybrid_search(collection, FakeEmbedder(), "salary bands", groups=["hr"], k=10)
 
     assert {h["source"] for h in public_hits} == {"handbook.pdf"}
     assert {h["source"] for h in hr_hits} == {"handbook.pdf", "hr/salaries.pdf"}

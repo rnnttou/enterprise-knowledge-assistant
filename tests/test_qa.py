@@ -6,7 +6,18 @@ import chromadb
 import pytest
 
 from app import qa
-from app.qa import NO_RESULTS_MESSAGE, REFUSAL_MESSAGE, Answer, GeminiAnswerer, answer, build_context, ask, clean_citations
+from app.qa import (
+    NO_RESULTS_MESSAGE,
+    REFUSAL_MESSAGE,
+    Answer,
+    GeminiAnswerer,
+    answer,
+    ask,
+    build_context,
+    build_history,
+    clean_citations,
+    contextualize_query,
+)
 from app.vector_store import get_collection, index_documents
 from tests.test_vector_store import write_pdf
 
@@ -136,15 +147,15 @@ def gemini_with_reply(reply: str) -> GeminiAnswerer:
 
 @pytest.fixture
 def fixed_hits(monkeypatch):
-    """Make search() return whatever hits the test puts in this list."""
+    """Make hybrid_search() return whatever hits the test puts in this list."""
     hits = []
-    monkeypatch.setattr(qa, "search", lambda collection, embedder, question, groups, k: hits)
+    monkeypatch.setattr(qa, "hybrid_search", lambda collection, embedder, question, groups, k: hits)
     return hits
 
 
-def run_answer(question, answerer):
-    # collection/embedder are never used because search() is patched.
-    return answer(question, collection=object(), embedder=FakeEmbedder(), answerer=answerer)
+def run_answer(question, answerer, history=None):
+    # collection/embedder are never used because hybrid_search() is patched.
+    return answer(question, collection=object(), embedder=FakeEmbedder(), answerer=answerer, history=history)
 
 
 def test_answer_with_good_match_returns_cited_answer(fixed_hits):
@@ -211,3 +222,81 @@ def test_clean_citations_keeps_order_and_removes_duplicates():
     text, markers = clean_citations("A [2]. B [1][2]. C [3].", num_sources=2)
     assert text == "A [2]. B [1][2]. C."
     assert markers == [2, 1]
+
+
+# --- Step 8: conversation memory -------------------------------------------
+
+HISTORY = [
+    {"question": "How many vacation days do employees get?", "answer": "25 days [1]."},
+    {"question": "Do unused days roll over?", "answer": "No, they expire in March [2]."},
+]
+
+
+def test_contextualize_query_without_history_returns_question_unchanged():
+    assert contextualize_query("What about managers?", None) == "What about managers?"
+    assert contextualize_query("What about managers?", []) == "What about managers?"
+
+
+def test_contextualize_query_prepends_recent_questions():
+    query = contextualize_query("What about managers?", HISTORY)
+    assert query == (
+        "How many vacation days do employees get?\n"
+        "Do unused days roll over?\n"
+        "What about managers?"
+    )
+
+
+def test_contextualize_query_keeps_only_the_most_recent_turns():
+    long_history = [{"question": f"question {i}", "answer": "a"} for i in range(5)]
+    query = contextualize_query("latest", long_history)
+    assert query == "question 3\nquestion 4\nlatest"
+
+
+def test_build_history_of_no_history_is_empty():
+    assert build_history(None) == ""
+    assert build_history([]) == ""
+
+
+def test_build_history_formats_turns_as_qa_pairs():
+    formatted = build_history(HISTORY)
+    assert "Q: How many vacation days do employees get?" in formatted
+    assert "A: 25 days [1]." in formatted
+    assert "Q: Do unused days roll over?" in formatted
+
+
+def test_answer_sends_history_to_the_model(fixed_hits):
+    fixed_hits.extend(HANDBOOK_HITS)
+    gemini = gemini_with_reply("Managers also get 25 days [1].")
+
+    result = run_answer("What about managers?", gemini, history=HISTORY)
+
+    assert result["refused"] is False
+    prompt = gemini.client.prompts[0]
+    assert "Previous conversation" in prompt
+    assert "Do unused days roll over?" in prompt
+    assert "Question: What about managers?" in prompt
+
+
+def test_answer_uses_history_to_retrieve_for_a_followup(monkeypatch):
+    captured = {}
+
+    def fake_hybrid_search(collection, embedder, question, groups, k):
+        captured["question"] = question
+        return list(HANDBOOK_HITS)
+
+    monkeypatch.setattr(qa, "hybrid_search", fake_hybrid_search)
+    gemini = gemini_with_reply("Managers also get 25 days [1].")
+
+    run_answer("What about managers?", gemini, history=HISTORY)
+
+    assert captured["question"] == contextualize_query("What about managers?", HISTORY)
+
+
+def test_answer_without_history_behaves_as_before(fixed_hits):
+    fixed_hits.extend(HANDBOOK_HITS)
+    gemini = gemini_with_reply("Full-time staff get 25 vacation days per year [1].")
+
+    result = run_answer("How many vacation days?", gemini)
+
+    assert result["refused"] is False
+    assert "Previous conversation" not in gemini.client.prompts[0]

@@ -2,7 +2,7 @@
 
 > Ask questions about your company's PDF documents and get answers **with cited sources**.
 
-![status](https://img.shields.io/badge/status-in%20progress-orange)
+![status](https://img.shields.io/badge/status-complete-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 
 Built by **[Rania Bentatou](https://github.com/rnnttou)**.
@@ -42,11 +42,11 @@ question ──► hybrid search (BM25 + vectors) ──► top chunks ──►
 - [x] **Step 3**: embeddings with Gemini, stored in ChromaDB
 - [x] **Step 4**: question answering with cited sources
 - [x] **Step 5**: FastAPI backend
-- [ ] **Step 6**: Streamlit UI
-- [ ] **Step 7**: hybrid retrieval (BM25 + vector search)
-- [ ] **Step 8**: conversation memory
-- [ ] **Step 9**: Docker packaging
-- [ ] **Step 10**: evaluation on 30–50 test questions (retrieval hit rate + latency)
+- [x] **Step 6**: Streamlit UI
+- [x] **Step 7**: hybrid retrieval (BM25 + vector search)
+- [x] **Step 8**: conversation memory
+- [x] **Step 9**: Docker packaging
+- [x] **Step 10**: evaluation on 30–50 test questions (retrieval hit rate + latency)
 
 ## Getting started
 
@@ -123,16 +123,62 @@ curl -X POST http://127.0.0.1:8000/index
 ```
 
 `/ask` runs the same retrieval + citation pipeline as `python -m app.qa` and returns
-`{"answer": ..., "citations": [{"marker", "source", "page", "snippet"}], "refused": ...}`.
+`{"answer": ..., "citations": [{"marker", "source", "page", "snippet"}], "refused": ..., "conversation_id": ...}`.
 `refused` is `true` when the documents don't contain the answer. `/index` re-runs the indexer, so new PDFs dropped into `data/` can be picked up without a server restart.
 
-### 7. Run the tests
+Pass the `conversation_id` from a response back into your next request to ask a
+follow-up ("What about for part-time staff?") that's understood in context of
+the earlier question and answer (Step 8). Omit it to start a new conversation.
+History is kept in memory per `conversation_id`, capped at the last 6 turns,
+and is lost on restart.
+
+### 7. Run the Streamlit UI
+
+With the API running (step 6) in one terminal, start the UI in another:
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+Then open <http://localhost:8501>. It's a thin client over the API: pick your
+groups and chunk count in the sidebar, ask questions in the chat box, and
+expand "Sources" under an answer to see the cited pages and snippets. Point it
+at a different backend with `API_URL=http://host:port streamlit run app/streamlit_app.py`.
+
+### 8. Run the tests
 
 ```bash
 pytest
 ```
 
 The tests use a fake embedder, so they run offline and don't use your API quota.
+
+### 9. Run everything with Docker
+
+With `.env` set up (step 2) and PDFs in `data/` (step 4):
+
+```bash
+docker compose up --build
+```
+
+This builds one image and runs it as two containers: `api` (FastAPI on
+<http://localhost:8000>) and `ui` (Streamlit on <http://localhost:8501>,
+pointed at `api` over the compose network). `data/` and `chroma_db/` are
+mounted as volumes, so PDFs and the index persist across restarts. Index your
+documents with `curl -X POST http://localhost:8000/index` or the UI's
+"Re-index documents" button.
+
+### 10. Evaluate retrieval quality
+
+```bash
+python -m app.evaluate
+```
+
+Runs `tests/eval_questions.json` (38 hand-written questions over the sample
+PDFs in `data/`) through hybrid_search and reports hit rate (did the right
+document show up in the top-k?) and latency, without spending any Gemini
+quota. Add `--full` to run the complete answer pipeline instead and also see
+the refusal rate; see [Evaluation](#evaluation) for a sample run.
 
 ## Project structure
 
@@ -144,10 +190,14 @@ enterprise-knowledge-assistant/
 │   ├── embeddings.py   # Gemini embeddings (Step 3)
 │   ├── vector_store.py # ChromaDB indexing and search (Step 3)
 │   ├── qa.py           # question answering with cited sources (Step 4)
-│   └── api.py          # FastAPI backend (Step 5)
+│   ├── api.py          # FastAPI backend (Step 5)
+│   ├── streamlit_app.py # Streamlit UI (Step 6)
+│   └── evaluate.py     # retrieval hit rate and latency (Step 10)
 ├── chroma_db/          # the vector index (created on first run, not committed)
 ├── data/               # put your PDFs here (not committed)
 ├── tests/              # unit tests and evaluation questions
+├── Dockerfile           # image shared by the api and ui containers (Step 9)
+├── docker-compose.yml   # runs api + ui together (Step 9)
 ├── .env.example        # template for secrets
 ├── requirements.txt
 └── README.md
@@ -155,7 +205,19 @@ enterprise-knowledge-assistant/
 
 ## Evaluation
 
-*Coming in Step 10:* results on 30–50 hand-written questions, showing how often the correct passage appears in the top-k results and the average answer latency.
+`python -m app.evaluate` against the sample PDFs in `data/` (employee
+handbook, NIST Cybersecurity Framework 2.0, two ANRT telecom market reports)
+over the 38 questions in `tests/eval_questions.json`:
+
+```
+38 questions, hit rate 100.0%, avg latency 1817ms, p95 5055ms
+```
+
+Hit rate is whether the expected source document appears in hybrid_search's
+top-5 results; latency is per-question retrieval time (embedding the query +
+vector search + BM25 + fusion), no chat-model call included. Re-run it after
+changing chunking, retrieval, or `k` to see the effect; numbers will vary with
+your own documents and questions.
 
 ## License
 

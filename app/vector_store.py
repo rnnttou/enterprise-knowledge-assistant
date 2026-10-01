@@ -14,13 +14,25 @@ Usage:
 """
 
 import argparse
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import chromadb
+from rank_bm25 import BM25Okapi
 
 from app.chunking import PUBLIC_GROUP, Document, chunk_document, discover
 from app.config import CHROMA_DIR, DATA_DIR, EMBEDDING_DIM, EMBEDDING_MODEL
+
+# How many candidates each side of the hybrid search contributes before fusion.
+# Wider than the final k so a chunk that's weak on one signal (e.g. a paraphrase
+# with few shared words) can still surface if the other signal ranks it highly.
+HYBRID_CANDIDATES = 20
+
+# Reciprocal rank fusion constant: dampens the gap between rank 1 and rank 2,
+# so one list's top hit doesn't always dominate the other's. 60 is the
+# standard value from the original RRF paper.
+RRF_K = 60
 
 
 def collection_name(model: str = EMBEDDING_MODEL, dim: int = EMBEDDING_DIM) -> str:
@@ -133,6 +145,76 @@ def search(collection, embedder, question: str, groups: list[str] | None = None,
             result["ids"][0], result["documents"][0], result["metadatas"][0], result["distances"][0]
         )
     ]
+
+
+def tokenize(text: str) -> list[str]:
+    return re.findall(r"\w+", text.lower())
+
+
+def bm25_search(collection, question: str, groups: list[str] | None = None, k: int = 5) -> list[dict]:
+    """Top-k chunks by keyword overlap (BM25), restricted to the user's groups.
+
+    Unlike vector search, this ranks chunks by shared words, so it catches
+    exact terms (acronyms, part numbers, names) that an embedding can blur.
+    """
+    result = collection.get(where=group_filter(groups or []), include=["documents", "metadatas"])
+    ids, docs, metas = result["ids"], result["documents"], result["metadatas"]
+    if not ids:
+        return []
+
+    bm25 = BM25Okapi([tokenize(doc) for doc in docs])
+    scores = bm25.get_scores(tokenize(question))
+    ranked = sorted(zip(ids, docs, metas, scores), key=lambda row: row[3], reverse=True)[:k]
+    return [
+        {"chunk_id": cid, "text": text, "bm25_score": score, **meta}
+        for cid, text, meta, score in ranked
+    ]
+
+
+def reciprocal_rank_fusion(rankings: list[list[str]], k: int = RRF_K) -> dict[str, float]:
+    """Combine several ranked id lists into one score per id (higher is better).
+
+    Each list only contributes by rank, not by its raw score, so BM25 scores
+    and cosine distances (which live on different scales) can be merged
+    without normalizing either of them.
+    """
+    scores: dict[str, float] = {}
+    for ranking in rankings:
+        for rank, chunk_id in enumerate(ranking):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
+    return scores
+
+
+def hybrid_search(
+    collection, embedder, question: str, groups: list[str] | None = None, k: int = 5, *, candidates: int = HYBRID_CANDIDATES
+) -> list[dict]:
+    """Top-k chunks blending vector similarity and BM25 keyword matching.
+
+    Each method retrieves its own top `candidates`, and reciprocal rank fusion
+    merges the two rankings. A chunk found only by BM25 (not among the vector
+    candidates) has no cosine distance, so it's given the worst distance seen
+    among the vector candidates: good enough to rank by, but it never beats a
+    hit both methods agree is relevant.
+    """
+    vector_hits = search(collection, embedder, question, groups, candidates)
+    bm25_hits = bm25_search(collection, question, groups, candidates)
+
+    by_id = {hit["chunk_id"]: hit for hit in vector_hits}
+    for hit in bm25_hits:
+        by_id.setdefault(hit["chunk_id"], hit)
+
+    fused = reciprocal_rank_fusion(
+        [[hit["chunk_id"] for hit in vector_hits], [hit["chunk_id"] for hit in bm25_hits]]
+    )
+    ranked_ids = sorted(fused, key=lambda cid: fused[cid], reverse=True)[:k]
+
+    worst_distance = max((hit["distance"] for hit in vector_hits), default=1.0)
+    hits = []
+    for cid in ranked_ids:
+        hit = dict(by_id[cid])
+        hit.setdefault("distance", worst_distance)
+        hits.append(hit)
+    return hits
 
 
 def main() -> None:

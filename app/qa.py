@@ -22,19 +22,26 @@ from google import genai
 from google.genai import errors, types
 
 from app.config import CHAT_MODEL, GEMINI_API_KEY, MAX_DISTANCE
-from app.vector_store import get_collection, search
+from app.vector_store import get_collection, hybrid_search, search
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant answering questions using ONLY the numbered "
     "excerpts below. Do not use outside knowledge. After each fact, cite the "
     "excerpt number(s) it came from in square brackets, e.g. [1] or [2][3]. "
-    "If the excerpts don't contain the answer, say so instead of guessing."
+    "If the excerpts don't contain the answer, say so instead of guessing. "
+    "You may use the previous conversation to understand follow-up questions "
+    "(e.g. what 'it' or 'they' refers to), but every fact must still come "
+    "from the numbered excerpts, not from the previous conversation."
 )
 
 MAX_RETRIES = 6
 SNIPPET_CHARS = 200   # how much of each cited chunk to show the user
 NO_RESULTS_MESSAGE = "I couldn't find anything relevant in the indexed documents."
 REFUSAL_MESSAGE = "I couldn't find this in the documents."
+
+# How many previous turns feed into retrieval for a follow-up question, e.g.
+# "What about for part-time staff?" needs the prior question to search well.
+HISTORY_TURNS_FOR_RETRIEVAL = 2
 
 # Matches citation markers like "[3]" or "[1, 2]" in the model's answer.
 CITATION_PATTERN = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
@@ -52,6 +59,27 @@ def build_context(hits: list[dict]) -> str:
         f"[{i}] {hit['source']}, p. {hit['page']}: {hit['text']}"
         for i, hit in enumerate(hits, start=1)
     )
+
+
+def build_history(history: list[dict] | None) -> str:
+    """Prior Q&A turns, formatted so the model can resolve follow-up questions."""
+    if not history:
+        return ""
+    turns = "\n\n".join(f"Q: {turn['question']}\nA: {turn['answer']}" for turn in history)
+    return f"Previous conversation:\n{turns}\n\n"
+
+
+def contextualize_query(question: str, history: list[dict] | None) -> str:
+    """Fold recent questions into the retrieval query for follow-ups.
+
+    A question like "What about for part-time staff?" shares almost no words
+    with the relevant chunk on its own; prepending the prior question(s)
+    gives hybrid_search something to match against.
+    """
+    if not history:
+        return question
+    prior_questions = [turn["question"] for turn in history[-HISTORY_TURNS_FOR_RETRIEVAL:]]
+    return "\n".join([*prior_questions, question])
 
 
 def clean_citations(text: str, num_sources: int) -> tuple[str, list[int]]:
@@ -86,10 +114,10 @@ class GeminiAnswerer:
         self.client = genai.Client(api_key=api_key)
         self.model = model
 
-    def answer(self, question: str, hits: list[dict]) -> str:
+    def answer(self, question: str, hits: list[dict], history: list[dict] | None = None) -> str:
         if not hits:
             return NO_RESULTS_MESSAGE
-        prompt = f"{build_context(hits)}\n\nQuestion: {question}"
+        prompt = f"{build_history(history)}{build_context(hits)}\n\nQuestion: {question}"
         config = types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT)
         response = self._call_with_retry(prompt, config)
         return response.text
@@ -120,29 +148,44 @@ def ask(question: str, groups: list[str] | None = None, k: int = 5, *, collectio
     return Answer(text=text, sources=hits)
 
 
-def answer(question: str, groups: list[str] | None = None, k: int = 5, *, collection=None, embedder=None, answerer=None) -> dict:
+def answer(
+    question: str,
+    groups: list[str] | None = None,
+    k: int = 5,
+    *,
+    history: list[dict] | None = None,
+    collection=None,
+    embedder=None,
+    answerer=None,
+) -> dict:
     """Answer a question from the documents the user's groups may read.
 
     Returns {"answer": str, "citations": [...], "refused": bool}. Each citation is
     {"marker": 1, "source": "employee-handbook.pdf", "page": 18, "snippet": "..."}.
-    The keyword arguments let tests pass fakes instead of Gemini and ChromaDB.
+    `history` is the conversation so far, as [{"question": ..., "answer": ...}, ...]
+    oldest first; pass it so a follow-up like "What about managers?" can be
+    retrieved and answered in context. The keyword arguments let tests pass
+    fakes instead of Gemini and ChromaDB.
     """
     from app.embeddings import GeminiEmbedder
 
     collection = collection or get_collection()
     embedder = embedder or GeminiEmbedder()
 
-    # 1. Retrieve the top-k chunks, already filtered by the user's access groups.
-    hits = search(collection, embedder, question, groups, k)
+    # 1. Retrieve the top-k chunks, blending vector and keyword search (Step 7)
+    #    over a query that folds in recent questions (Step 8) for follow-ups,
+    #    already filtered by the user's access groups.
+    retrieval_query = contextualize_query(question, history)
+    hits = hybrid_search(collection, embedder, retrieval_query, groups, k)
 
     # 2. If even the closest chunk is far away, the documents probably don't
     #    cover this question. Refuse without spending a chat-model call.
     if not hits or hits[0]["distance"] > MAX_DISTANCE:
         return {"answer": REFUSAL_MESSAGE, "citations": [], "refused": True}
 
-    # 3. Ask the model, giving it only these numbered chunks.
+    # 3. Ask the model, giving it only these numbered chunks plus any history.
     answerer = answerer or GeminiAnswerer()
-    raw_text = answerer.answer(question, hits)
+    raw_text = answerer.answer(question, hits, history)
 
     # 4. Remove any [n] that doesn't match a chunk we sent.
     text, markers = clean_citations(raw_text, len(hits))
