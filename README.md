@@ -41,7 +41,7 @@ question ──► hybrid search (BM25 + vectors) ──► top chunks ──►
 - [x] **Step 2**: load PDFs and split them into chunks
 - [x] **Step 3**: embeddings with Gemini, stored in ChromaDB
 - [x] **Step 4**: question answering with cited sources
-- [ ] **Step 5**: FastAPI backend
+- [x] **Step 5**: FastAPI backend
 - [ ] **Step 6**: Streamlit UI
 - [ ] **Step 7**: hybrid retrieval (BM25 + vector search)
 - [ ] **Step 8**: conversation memory
@@ -107,7 +107,24 @@ python -m app.qa "salary bands" --groups hr
 
 The chat model only sees the retrieved excerpts (never the full corpus), answers from them alone, and cites which excerpt each fact came from. Answers print alongside the source document and page for each excerpt used.
 
-### 6. Run the tests
+### 6. Run the API
+
+```bash
+uvicorn app.api:app --reload
+```
+
+Then open <http://127.0.0.1:8000/docs> for interactive API docs, or call it directly:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl -X POST http://127.0.0.1:8000/ask -H "Content-Type: application/json" \
+  -d '{"question": "How many vacation days do employees get?", "groups": ["hr"], "k": 5}'
+curl -X POST http://127.0.0.1:8000/index
+```
+
+`/ask` runs the same retrieval + citation pipeline as `python -m app.qa`. `/index` re-runs the indexer, so new PDFs dropped into `data/` can be picked up without a server restart.
+
+### 7. Run the tests
 
 ```bash
 pytest
@@ -124,7 +141,8 @@ enterprise-knowledge-assistant/
 │   ├── chunking.py     # PDF loading and splitting (Step 2)
 │   ├── embeddings.py   # Gemini embeddings (Step 3)
 │   ├── vector_store.py # ChromaDB indexing and search (Step 3)
-│   └── qa.py           # question answering with cited sources (Step 4)
+│   ├── qa.py           # question answering with cited sources (Step 4)
+│   └── api.py          # FastAPI backend (Step 5)
 ├── chroma_db/          # the vector index (created on first run, not committed)
 ├── data/               # put your PDFs here (not committed)
 ├── tests/              # unit tests and evaluation questions

@@ -3,3 +3,6 @@ pypdf
 google-genai
 chromadb
 pytest
+fastapi
+uvicorn
+httpx
