@@ -7,6 +7,7 @@ uses to place questions close to the passages that answer them.
 import math
 import time
 
+import httpx
 from google import genai
 from google.genai import errors, types
 
@@ -62,4 +63,13 @@ class GeminiEmbedder:
                     raise
                 wait = min(2 ** attempt * 5, 60)
                 print(f"  Gemini returned {exc.code}, retrying in {wait}s...")
+                time.sleep(wait)
+            except httpx.TransportError as exc:
+                # The connection itself dropped (e.g. "Server disconnected without
+                # sending a response") -- no HTTP status to check, but transient
+                # enough on a free-tier endpoint to be worth retrying the same way.
+                if attempt == MAX_RETRIES - 1:
+                    raise
+                wait = min(2 ** attempt * 5, 60)
+                print(f"  Connection error ({exc}), retrying in {wait}s...")
                 time.sleep(wait)

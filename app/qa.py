@@ -1,9 +1,9 @@
 """Step 4: answer questions with citations, grounded in retrieved chunks.
 
-The chat model only ever sees the top-k chunks returned by search(), never
-the whole corpus, and is instructed to answer from them alone and cite the
-excerpt number(s) it used. That keeps answers checkable against a page and
-makes "I don't know" the expected response when nothing relevant is found.
+The chat model only ever sees the top-k chunks returned by hybrid_search(),
+never the whole corpus, and is instructed to answer from them alone and cite
+the excerpt number(s) it used. That keeps answers checkable against a page
+and makes "I don't know" the expected response when nothing relevant is found.
 
 The main entry point is answer(), which returns a plain dict:
     {"answer": str, "citations": [{marker, source, page, snippet}], "refused": bool}
@@ -16,13 +16,13 @@ Usage:
 import argparse
 import re
 import time
-from dataclasses import dataclass, field
 
+import httpx
 from google import genai
 from google.genai import errors, types
 
 from app.config import CHAT_MODEL, GEMINI_API_KEY, MAX_DISTANCE
-from app.vector_store import get_collection, hybrid_search, search
+from app.vector_store import get_collection, hybrid_search
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant answering questions using ONLY the numbered "
@@ -45,12 +45,6 @@ HISTORY_TURNS_FOR_RETRIEVAL = 2
 
 # Matches citation markers like "[3]" or "[1, 2]" in the model's answer.
 CITATION_PATTERN = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
-
-
-@dataclass
-class Answer:
-    text: str
-    sources: list[dict] = field(default_factory=list)
 
 
 def build_context(hits: list[dict]) -> str:
@@ -134,18 +128,12 @@ class GeminiAnswerer:
                 wait = min(2 ** attempt * 5, 60)
                 print(f"  Gemini returned {exc.code}, retrying in {wait}s...")
                 time.sleep(wait)
-
-
-def ask(question: str, groups: list[str] | None = None, k: int = 5, *, collection=None, embedder=None, answerer=None) -> Answer:
-    from app.embeddings import GeminiEmbedder
-
-    collection = collection or get_collection()
-    embedder = embedder or GeminiEmbedder()
-    answerer = answerer or GeminiAnswerer()
-
-    hits = search(collection, embedder, question, groups, k)
-    text = answerer.answer(question, hits)
-    return Answer(text=text, sources=hits)
+            except httpx.TransportError as exc:
+                if attempt == MAX_RETRIES - 1:
+                    raise
+                wait = min(2 ** attempt * 5, 60)
+                print(f"  Connection error ({exc}), retrying in {wait}s...")
+                time.sleep(wait)
 
 
 def answer(
@@ -180,7 +168,11 @@ def answer(
 
     # 2. If even the closest chunk is far away, the documents probably don't
     #    cover this question. Refuse without spending a chat-model call.
-    if not hits or hits[0]["distance"] > MAX_DISTANCE:
+    #    Uses best_vector_distance (the closest vector match found, same value
+    #    on every hit), not hits[0]["distance"]: the top fused result can be a
+    #    BM25-only match carrying a placeholder worst-case distance, which
+    #    would wrongly trigger a refusal even when a close vector match exists.
+    if not hits or hits[0]["best_vector_distance"] > MAX_DISTANCE:
         return {"answer": REFUSAL_MESSAGE, "citations": [], "refused": True}
 
     # 3. Ask the model, giving it only these numbered chunks plus any history.

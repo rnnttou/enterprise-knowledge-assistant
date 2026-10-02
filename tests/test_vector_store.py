@@ -10,6 +10,7 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from app.vector_store import (
+    _BM25_CACHE,
     bm25_search,
     get_collection,
     hybrid_search,
@@ -17,6 +18,16 @@ from app.vector_store import (
     reciprocal_rank_fusion,
     search,
 )
+
+
+@pytest.fixture(autouse=True)
+def clear_bm25_cache():
+    # Tests reuse the same collection name ("chunks-fake-embedder-8") across
+    # fresh ephemeral clients, which would otherwise leak a previous test's
+    # cached BM25 index into the next one.
+    _BM25_CACHE.clear()
+    yield
+    _BM25_CACHE.clear()
 
 
 class FakeEmbedder:

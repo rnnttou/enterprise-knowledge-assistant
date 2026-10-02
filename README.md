@@ -9,6 +9,10 @@ Built by **[Rania Bentatou](https://github.com/rnnttou)**.
 
 ---
 
+![Streamlit UI screenshot](docs/screenshot.png)
+
+---
+
 ## What it does
 
 1. **Upload PDFs** (policies, manuals, reports…)
@@ -81,7 +85,17 @@ python -m app.config
 
 ### 4. Index your PDFs
 
-Put PDFs in `data/`, then embed them into ChromaDB (stored in `chroma_db/`):
+`data/` isn't committed, so bring your own PDFs, or use the same sample set
+this README's numbers were measured on:
+
+- Colorado College Employee Policy Handbook
+- NIST Cybersecurity Framework 2.0 (NIST CSWP 29)
+- ANRT quarterly telecom market memo, Q2 2023
+- ANRT annual report, 2018-2019
+
+<!-- TODO: add direct download links for the four files above -->
+
+Then embed them into ChromaDB (stored in `chroma_db/`):
 
 ```bash
 python -m app.vector_store
@@ -90,6 +104,8 @@ python -m app.vector_store
 Re-running is cheap: unchanged files are skipped, changed files have their chunks replaced, and deleted files are removed from the index. The free Gemini tier is rate-limited, so the first run pauses and retries when it hits the limit.
 
 PDFs in a sub-folder are only visible to that group: `data/hr/salaries.pdf` can be read by `hr`, while files directly in `data/` are public.
+
+**This is a demonstration of group-based filtering, not real access control.** The caller states which groups they belong to (via `--groups`, the API's `groups` field, or the Streamlit sidebar) and the system trusts that claim -- there's no authentication, so anyone can type `hr` and read HR-only documents. In production, `groups` would come from the authenticated user's token (e.g. claims in a verified JWT or a lookup against an identity provider), never from a client-supplied field.
 
 Try a search:
 
@@ -176,11 +192,14 @@ button.
 python -m app.evaluate
 ```
 
-Runs `tests/eval_questions.json` (38 hand-written questions over the sample
-PDFs in `data/`) through hybrid_search and reports hit rate (did the right
-document show up in the top-k?) and latency, without spending any Gemini
-quota. Add `--full` to run the complete answer pipeline instead and also see
-the refusal rate; see [Evaluation](#evaluation) for a sample run.
+Runs `tests/eval_questions.json` (38 answerable questions plus 8 intentionally
+unanswerable ones, over the sample PDFs in `data/`) through vector search,
+BM25, and hybrid search side by side, reporting hit@1, hit@5, and MRR scored
+at the page level, plus whether the refusal gate correctly rejects the
+unanswerable questions. Only the query is embedded, so this doesn't spend
+chat-model quota. Add `--full` to run the complete answer pipeline instead
+and see real citations and refusals; see [Evaluation](#evaluation) for a
+sample run.
 
 ## Project structure
 
@@ -196,30 +215,77 @@ enterprise-knowledge-assistant/
 │   ├── streamlit_app.py # Streamlit UI (Step 6)
 │   └── evaluate.py     # retrieval hit rate and latency (Step 10)
 ├── chroma_db/          # the vector index (created on first run, not committed)
-├── data/               # put your PDFs here (not committed)
+├── data/               # put your PDFs here (not committed, see Sample data)
 ├── tests/              # unit tests and evaluation questions
 ├── Dockerfile           # image shared by the api and ui containers (Step 9)
 ├── docker-compose.yml   # runs api + ui together (Step 9)
 ├── .env.example        # template for secrets
 ├── requirements.txt
+├── LICENSE
 └── README.md
 ```
 
 ## Evaluation
 
 `python -m app.evaluate` against the sample PDFs in `data/` (employee
-handbook, NIST Cybersecurity Framework 2.0, two ANRT telecom market reports)
-over the 38 questions in `tests/eval_questions.json`:
+handbook, NIST Cybersecurity Framework 2.0, two ANRT telecom market reports),
+using the 38 answerable questions in `tests/eval_questions.json`. Each
+question's ground truth is the exact source document **and page** that
+answers it (found by locating the passage by hand, not guessed), so a hit
+requires retrieving the right page, not just the right document -- a much
+stricter bar than document-level hit rate, which "100% hit rate on 4 very
+different documents" doesn't really test. A hit counts a page within ±1 of
+the expected one, since chunking can split an answer across a page boundary.
 
 ```
-38 questions, hit rate 100.0%, avg latency 1817ms, p95 5055ms
+method     hit@1   hit@5     mrr   avg latency
+vector    78.9%  97.4%   0.854        472ms
+bm25      73.7% 100.0%   0.841          4ms
+hybrid    84.2%  97.4%   0.891        789ms
 ```
 
-Hit rate is whether the expected source document appears in hybrid_search's
-top-5 results; latency is per-question retrieval time (embedding the query +
-vector search + BM25 + fusion), no chat-model call included. Re-run it after
-changing chunking, retrieval, or `k` to see the effect; numbers will vary with
-your own documents and questions.
+- **hit@1** -- is the expected page the single top result?
+- **hit@5** -- does the expected page appear anywhere in the top 5?
+- **MRR** -- mean reciprocal rank of the expected page (0 if never found)
+
+This is what justifies hybrid retrieval rather than just asserting it:
+hybrid's hit@1 and MRR beat both individual methods (vector alone misses
+exact-term questions like acronyms and dates that BM25 catches; BM25 alone
+misses paraphrases vector search catches), confirming the two signals are
+complementary rather than one dominating. `vector` and `hybrid` call the
+Gemini embedding API per question, so their latency includes a network round
+trip and varies with free-tier rate limiting (observed 789ms-4.4s average
+across runs); `bm25` doesn't call any API and stays in single-digit
+milliseconds regardless.
+
+**Refusal check**: the 8 questions in `tests/eval_questions.json` marked
+`"unanswerable": true` (e.g. "What is the recipe for a classic French
+bouillabaisse?") are outside all four documents. `python -m app.evaluate`
+also reports how often the distance-based refusal gate (the same check
+`app.qa.answer()` uses before spending a chat-model call) correctly refuses
+these, and how often it wrongly refuses one of the 38 real questions instead:
+
+```
+Correctly refused: 100.0% (8 questions)
+Wrongly refused answerable questions: 0.0% (38 questions)
+```
+
+Run `python -m app.evaluate --full` to go through the complete `answer()`
+pipeline instead (spends Gemini chat-model quota, much slower), which
+reports the same hit@1/hit@5/MRR from the actual citations returned, plus
+real refusal counts from the chat model rather than the distance gate alone.
+
+Re-run after changing chunking, retrieval, or `k` to see the effect; numbers
+will vary with your own documents and questions.
+
+**BM25 performance**: `bm25_search()` used to rebuild its index (tokenizing
+every chunk in the collection) on every single question, which dominated
+retrieval latency. It's now built once per collection and cached, invalidated
+only when `/index` actually changes something. Before: hybrid search
+averaged ~1.8s per question (p95 ~5s) on this dataset; after: BM25's own
+share of that latency dropped to ~4ms per question (shown in the table
+above), with the remaining hybrid latency now coming almost entirely from
+the embedding API call.
 
 ## License
 

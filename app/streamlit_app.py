@@ -28,6 +28,10 @@ with st.sidebar:
     )
     k = st.slider("Chunks to retrieve", min_value=1, max_value=20, value=5)
     st.divider()
+    if st.button("New conversation"):
+        st.session_state.messages = []
+        st.session_state.conversation_id = None
+        st.rerun()
     if st.button("Re-index documents"):
         with st.spinner("Indexing data/ ..."):
             try:
@@ -42,6 +46,8 @@ with st.sidebar:
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "conversation_id" not in st.session_state:
+    st.session_state.conversation_id = None
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -59,7 +65,12 @@ if question:
         try:
             response = httpx.post(
                 f"{API_URL}/ask",
-                json={"question": question, "groups": groups, "k": k},
+                json={
+                    "question": question,
+                    "groups": groups,
+                    "k": k,
+                    "conversation_id": st.session_state.conversation_id,
+                },
                 timeout=60,
             )
             response.raise_for_status()
@@ -67,6 +78,7 @@ if question:
         except httpx.HTTPError as exc:
             st.error(f"Couldn't reach the API: {exc}")
         else:
+            st.session_state.conversation_id = result["conversation_id"]
             st.markdown(result["answer"])
             if result["citations"]:
                 with st.expander("Sources"):

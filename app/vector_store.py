@@ -121,6 +121,9 @@ def index_documents(collection, embedder, data_dir: Path = DATA_DIR) -> IndexSta
         collection.delete(where={"doc_id": doc_id})
         stats.removed.append(doc_id)
 
+    if stats.indexed or stats.removed or stats.empty:
+        invalidate_bm25_cache(collection)
+
     return stats
 
 
@@ -151,20 +154,53 @@ def tokenize(text: str) -> list[str]:
     return re.findall(r"\w+", text.lower())
 
 
+# Cache key: collection.name -> (ids, docs, metas, BM25Okapi). Rebuilding the
+# index from every chunk's text on every question dominated retrieval latency
+# (see README Evaluation section for before/after numbers). invalidate_bm25_cache()
+# must be called whenever a collection's contents change.
+_BM25_CACHE: dict[str, tuple[list[str], list[str], list[dict], BM25Okapi]] = {}
+
+
+def invalidate_bm25_cache(collection) -> None:
+    _BM25_CACHE.pop(collection.name, None)
+
+
+def _get_bm25_index(collection, groups: list[str] | None):
+    """Cached (ids, docs, metas, BM25Okapi) for this collection's whole corpus.
+
+    Built once per collection and reused across questions. Group filtering is
+    applied after scoring (cheap: a slice of already-ranked results), so the
+    expensive part -- tokenizing every chunk and building the BM25 index --
+    only happens again after a re-index.
+    """
+    cached = _BM25_CACHE.get(collection.name)
+    if cached is None:
+        result = collection.get(include=["documents", "metadatas"])
+        ids, docs, metas = result["ids"], result["documents"], result["metadatas"]
+        bm25 = BM25Okapi([tokenize(doc) for doc in docs]) if ids else None
+        cached = (ids, docs, metas, bm25)
+        _BM25_CACHE[collection.name] = cached
+    return cached
+
+
 def bm25_search(collection, question: str, groups: list[str] | None = None, k: int = 5) -> list[dict]:
     """Top-k chunks by keyword overlap (BM25), restricted to the user's groups.
 
     Unlike vector search, this ranks chunks by shared words, so it catches
     exact terms (acronyms, part numbers, names) that an embedding can blur.
     """
-    result = collection.get(where=group_filter(groups or []), include=["documents", "metadatas"])
-    ids, docs, metas = result["ids"], result["documents"], result["metadatas"]
+    ids, docs, metas, bm25 = _get_bm25_index(collection, groups)
     if not ids:
         return []
 
-    bm25 = BM25Okapi([tokenize(doc) for doc in docs])
+    allowed_keys = {group_key(g) for g in [*(groups or []), PUBLIC_GROUP]}
     scores = bm25.get_scores(tokenize(question))
-    ranked = sorted(zip(ids, docs, metas, scores), key=lambda row: row[3], reverse=True)[:k]
+    candidates = [
+        (cid, doc, meta, score)
+        for cid, doc, meta, score in zip(ids, docs, metas, scores)
+        if allowed_keys & {k for k, v in meta.items() if k.startswith("grp_") and v}
+    ]
+    ranked = sorted(candidates, key=lambda row: row[3], reverse=True)[:k]
     return [
         {"chunk_id": cid, "text": text, "bm25_score": score, **meta}
         for cid, text, meta, score in ranked
@@ -195,6 +231,14 @@ def hybrid_search(
     candidates) has no cosine distance, so it's given the worst distance seen
     among the vector candidates: good enough to rank by, but it never beats a
     hit both methods agree is relevant.
+
+    Every returned hit also carries `best_vector_distance`: the closest
+    cosine distance vector search found for this query, the same value on
+    every hit. Callers deciding whether to refuse (is anything close enough
+    in meaning?) should use this instead of a hit's own `distance` -- the
+    top fused result can be a BM25-only match carrying the placeholder worst
+    distance above, which would wrongly look too far away even when a
+    genuinely close vector match exists elsewhere in the candidate pool.
     """
     vector_hits = search(collection, embedder, question, groups, candidates)
     bm25_hits = bm25_search(collection, question, groups, candidates)
@@ -209,10 +253,12 @@ def hybrid_search(
     ranked_ids = sorted(fused, key=lambda cid: fused[cid], reverse=True)[:k]
 
     worst_distance = max((hit["distance"] for hit in vector_hits), default=1.0)
+    best_vector_distance = min((hit["distance"] for hit in vector_hits), default=worst_distance)
     hits = []
     for cid in ranked_ids:
         hit = dict(by_id[cid])
         hit.setdefault("distance", worst_distance)
+        hit["best_vector_distance"] = best_vector_distance
         hits.append(hit)
     return hits
 
