@@ -162,11 +162,13 @@ docker compose up --build
 ```
 
 This builds one image and runs it as two containers: `api` (FastAPI on
-<http://localhost:8000>) and `ui` (Streamlit on <http://localhost:8501>,
-pointed at `api` over the compose network). `data/` and `chroma_db/` are
-mounted as volumes, so PDFs and the index persist across restarts. Index your
-documents with `curl -X POST http://localhost:8000/index` or the UI's
-"Re-index documents" button.
+<http://localhost:8088>, mapped from the container's port 8000 - see the
+comment in `docker-compose.yml` if you hit a port-binding error on
+Windows/WSL) and `ui` (Streamlit on <http://localhost:8501>, pointed at `api`
+over the compose network). `data/` and `chroma_db/` are mounted as volumes, so
+PDFs and the index persist across restarts. Index your documents with
+`curl -X POST http://localhost:8088/index` or the UI's "Re-index documents"
+button.
 
 ### 10. Evaluate retrieval quality
 
