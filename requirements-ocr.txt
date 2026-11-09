@@ -1,0 +1,9 @@
+# Optional: read scanned PDFs and images (Step 11).
+#   pip install -r requirements-ocr.txt
+# Installs PyTorch. The default wheel from PyPI is CPU-only on Windows; for an
+# NVIDIA GPU install torch/torchvision from https://pytorch.org first.
+doclayout-yolo==0.0.4
+easyocr==1.7.2
+pypdfium2==5.15.2
+torch==2.15.0
+torchvision==0.29.2

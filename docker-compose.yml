@@ -1,6 +1,10 @@
 services:
   api:
-    build: .
+    build:
+      context: .
+      args:
+        # true = read scanned PDFs and images (Step 11); bigger image
+        WITH_OCR: ${WITH_OCR:-false}
     command: ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       # Host port 8088 (not 8000): Windows/WSL reserves ranges of ports for
@@ -13,6 +17,9 @@ services:
     volumes:
       - ./data:/app/data
       - ./chroma_db:/app/chroma_db
+      # Layout (DocLayout-YOLO) and OCR (EasyOCR) weights, downloaded once
+      - model_cache:/root/.cache
+      - easyocr_models:/root/.EasyOCR
 
   ui:
     build: .
@@ -24,3 +31,7 @@ services:
       API_URL: http://api:8000
     depends_on:
       - api
+
+volumes:
+  model_cache:
+  easyocr_models:

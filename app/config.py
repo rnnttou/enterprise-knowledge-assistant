@@ -34,6 +34,20 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))   # characters shared bet
 # between on-topic questions (~0.25-0.35) and off-topic ones (~0.5) on our PDFs.
 MAX_DISTANCE = float(os.getenv("MAX_DISTANCE", "0.45"))
 
+# Scanned documents and images (Step 11, needs requirements-ocr.txt).
+#   auto:   OCR only PDF pages whose text layer has fewer than OCR_MIN_CHARS
+#           characters (scans), plus every image file
+#   always: OCR every PDF page too, ignoring the text layer
+#   off:    never OCR; scanned pages are reported as empty
+OCR_MODE = os.getenv("OCR_MODE", "auto").strip().lower()
+OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", "20"))
+OCR_LANGUAGES = [l.strip() for l in os.getenv("OCR_LANGUAGES", "en,fr").split(",") if l.strip()]
+OCR_DPI = int(os.getenv("OCR_DPI", "200"))                         # PDF page render resolution
+OCR_MIN_CONFIDENCE = float(os.getenv("OCR_MIN_CONFIDENCE", "0.3"))  # drop OCR words below this
+LAYOUT_MODEL_REPO = os.getenv("LAYOUT_MODEL_REPO", "juliozhao/DocLayout-YOLO-DocStructBench")
+LAYOUT_MODEL_FILE = os.getenv("LAYOUT_MODEL_FILE", "doclayout_yolo_docstructbench_imgsz1024.pt")
+LAYOUT_CONFIDENCE = float(os.getenv("LAYOUT_CONFIDENCE", "0.25"))
+
 
 if __name__ == "__main__":
     # Quick sanity check: python -m app.config
@@ -42,3 +56,5 @@ if __name__ == "__main__":
     print(f"Embedding dim:   {EMBEDDING_DIM}")
     print(f"Chat model:      {CHAT_MODEL}")
     print(f"API key set:     {'yes' if GEMINI_API_KEY else 'NO - add it to .env'}")
+    from app.ocr import ocr_available
+    print(f"OCR mode:        {OCR_MODE} ({'installed' if ocr_available() else 'not installed'})")

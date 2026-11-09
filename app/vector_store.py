@@ -21,8 +21,9 @@ from pathlib import Path
 import chromadb
 from rank_bm25 import BM25Okapi
 
-from app.chunking import PUBLIC_GROUP, Document, chunk_document, discover
+from app.chunking import AUTO, PUBLIC_GROUP, Document, chunk_document, discover
 from app.config import CHROMA_DIR, DATA_DIR, EMBEDDING_DIM, EMBEDDING_MODEL
+from app.ocr import get_default_ocr
 
 # How many candidates each side of the hybrid search contributes before fusion.
 # Wider than the final k so a chunk that's weak on one signal (e.g. a paraphrase
@@ -60,6 +61,7 @@ def chunk_metadata(doc: Document, chunk, embed_model: str) -> dict:
         "source": doc.source,
         "page": chunk.page,
         "chunk_index": chunk.chunk_index,
+        "extraction": chunk.extraction,                  # "text" or "ocr"
         "content_hash": doc.content_hash,
         "modified_at": doc.modified_at,
         "embed_model": embed_model,
@@ -86,7 +88,7 @@ def stored_hashes(collection) -> dict[str, str]:
     return {m["doc_id"]: m["content_hash"] for m in result["metadatas"]}
 
 
-def index_documents(collection, embedder, data_dir: Path = DATA_DIR) -> IndexStats:
+def index_documents(collection, embedder, data_dir: Path = DATA_DIR, ocr=AUTO) -> IndexStats:
     stats = IndexStats()
     docs = discover(data_dir)
     known = stored_hashes(collection)
@@ -96,9 +98,9 @@ def index_documents(collection, embedder, data_dir: Path = DATA_DIR) -> IndexSta
             stats.skipped.append(doc.source)
             continue
 
-        chunks = chunk_document(doc)
+        chunks = chunk_document(doc, ocr)
         if not chunks:
-            # Likely a scanned PDF with no text layer (OCR comes later).
+            # A scan or image with no readable text, or OCR isn't installed.
             stats.empty.append(doc.source)
             collection.delete(where={"doc_id": doc.doc_id})
             continue
@@ -286,7 +288,8 @@ def main() -> None:
     print(f"\nIndexed {len(stats.indexed)} document(s), {stats.chunks_added} chunks added.")
     print(f"Skipped {len(stats.skipped)} unchanged, removed {len(stats.removed)} deleted.")
     if stats.empty:
-        print(f"No text found in: {', '.join(stats.empty)} (scanned PDFs need OCR)")
+        hint = "" if get_default_ocr() else " (scans need OCR: pip install -r requirements-ocr.txt)"
+        print(f"No text found in: {', '.join(stats.empty)}{hint}")
     print(f"Collection '{collection.name}' now holds {collection.count()} chunks in {CHROMA_DIR}")
 
 

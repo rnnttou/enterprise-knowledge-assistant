@@ -15,15 +15,15 @@ Built by **[Rania Bentatou](https://github.com/rnnttou)**.
 
 ## What it does
 
-1. **Upload PDFs** (policies, manuals, reports…)
+1. **Upload PDFs** (policies, manuals, reports…), **scans and images** (read with layout detection + OCR)
 2. **Split** them into small chunks of text
 3. **Embed** each chunk with Google Gemini (free tier), turning text into vectors
 4. **Store** the vectors in ChromaDB
 5. **Answer questions**: find the most relevant chunks, then let Gemini write an answer that cites which document and page each fact came from
 
 ```
-PDF ──► chunks ──► embeddings ──► ChromaDB
-                                      │
+PDF (text) ────────────────────────┬──► chunks ──► embeddings ──► ChromaDB
+scan / image ──► layout YOLO + OCR ─┘                                  │
 question ──► hybrid search (BM25 + vectors) ──► top chunks ──► Gemini ──► answer + sources
 ```
 
@@ -34,6 +34,8 @@ question ──► hybrid search (BM25 + vectors) ──► top chunks ──►
 | LLM + embeddings | Google Gemini API (free tier) |
 | Vector store     | ChromaDB                      |
 | Keyword search   | BM25 (`rank-bm25`)            |
+| Layout detection | DocLayout-YOLO (optional)     |
+| OCR              | EasyOCR (optional)            |
 | API              | FastAPI                       |
 | UI               | Streamlit                     |
 | Packaging        | Docker / docker compose       |
@@ -51,6 +53,7 @@ question ──► hybrid search (BM25 + vectors) ──► top chunks ──►
 - [x] **Step 8**: conversation memory
 - [x] **Step 9**: Docker packaging
 - [x] **Step 10**: evaluation on 30–50 test questions (retrieval hit rate + latency)
+- [x] **Step 11**: scanned PDFs and images: layout detection (DocLayout-YOLO) + OCR
 
 ## Getting started
 
@@ -88,12 +91,10 @@ python -m app.config
 `data/` isn't committed, so bring your own PDFs, or use the same sample set
 this README's numbers were measured on:
 
-- Colorado College Employee Policy Handbook
-- NIST Cybersecurity Framework 2.0 (NIST CSWP 29)
-- ANRT quarterly telecom market memo, Q2 2023
-- ANRT annual report, 2018-2019
-
-<!-- TODO: add direct download links for the four files above -->
+- [Colorado College Employee Policy Handbook](https://www.coloradocollege.edu/offices/humanresources/people-practices/handbooks) (save as `data/employee-handbook.pdf`; the handbook is revised periodically, so page numbers in the eval may shift with newer versions)
+- [NIST Cybersecurity Framework 2.0 (NIST CSWP 29)](https://nvlpubs.nist.gov/nistpubs/CSWP/NIST.CSWP.29.pdf) (save as `data/nist-cybersecurity-framework-2.0.pdf`)
+- [ANRT quarterly telecom market memo, Q2 2023](https://www.anrt.ma/sites/default/files/2023-09/observatoires_anrt_-_le_memo_-_t2-2023.pdf) (save as `data/anrt-memo-t2-2023.pdf`)
+- [ANRT annual report, 2018-2019](https://anrt.ma/sites/default/files/2025-02/Rapport_Annuel_ANRT_2018_2019.pdf) (save as `data/anrt-rapport-annuel-2018-2019.pdf`)
 
 Then embed them into ChromaDB (stored in `chroma_db/`):
 
@@ -167,7 +168,7 @@ at a different backend with `API_URL=http://host:port streamlit run app/streamli
 pytest
 ```
 
-The tests use a fake embedder, so they run offline and don't use your API quota.
+The tests use a fake embedder and fake layout/OCR models, so they run offline, don't use your API quota, and don't need `requirements-ocr.txt`.
 
 ### 9. Run everything with Docker
 
@@ -201,13 +202,67 @@ chat-model quota. Add `--full` to run the complete answer pipeline instead
 and see real citations and refusals; see [Evaluation](#evaluation) for a
 sample run.
 
+### 11. Scanned documents and images (optional)
+
+Scanned PDFs have no text layer, and images (`.png`, `.jpg`, `.tiff`, `.bmp`,
+`.webp`) have none at all, so without this step they're reported as "No
+text found" and skipped. Install the extra dependencies (PyTorch, ~1 GB) to
+read them:
+
+```bash
+pip install -r requirements-ocr.txt
+```
+
+Then drop scans or images into `data/` (sub-folders give access groups, as
+for PDFs) and re-index as usual. Each page goes through `app/ocr.py`:
+
+```
+page image ──► DocLayout-YOLO ──► regions (title, text, table, figure, caption…)
+                                      │ reading order (two-column aware)
+                                      ▼
+                    EasyOCR on each cropped region ──► page text ──► chunks ──► index
+```
+
+1. **Layout detection**: [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO),
+   a YOLOv10 model pre-trained on document pages (DocStructBench weights,
+   downloaded from the Hugging Face Hub on first use), finds the page's titles,
+   paragraphs, tables, figures, captions and margins.
+2. **Reading order**: page-wide regions split the page into bands; inside a
+   band the left column is read before the right one.
+3. **OCR** of each region with [EasyOCR](https://github.com/JaidedAI/EasyOCR)
+   (French + English by default, `OCR_LANGUAGES`). Tables keep one row per
+   line with cells joined by ` | `, so a number stays next to its row label;
+   figure text is prefixed `[Figure]`; formulas are skipped. Regions the model
+   marks as page furniture are kept only if they hold real words, which drops
+   page numbers but keeps the key-figure strips report pages often put at the
+   bottom.
+
+The OCR'd text is chunked, embedded and cited (document + page) like any
+other page; its chunks carry `extraction: "ocr"` in their metadata. Text PDFs
+aren't affected: in the default `OCR_MODE=auto` only pages with almost no
+text (under `OCR_MIN_CHARS`) **that contain an image** are OCR'd.
+`OCR_MODE=always` OCRs every page, `OCR_MODE=off` disables it.
+
+Try it on a single file to see what was detected:
+
+```bash
+python -m app.ocr path/to/scan.png --regions
+```
+
+OCR runs on CPU by default (about 15-30 s per page); with an NVIDIA GPU,
+install the CUDA build of `torch`/`torchvision` from <https://pytorch.org>
+first and it's used automatically. In Docker, build with
+`WITH_OCR=true docker compose up --build` (CPU wheels; model weights are
+cached in named volumes).
+
 ## Project structure
 
 ```
 enterprise-knowledge-assistant/
 ├── app/                # application code
 │   ├── config.py       # settings loaded from .env
-│   ├── chunking.py     # PDF loading and splitting (Step 2)
+│   ├── chunking.py     # PDF/image loading and splitting (Step 2)
+│   ├── ocr.py          # layout detection + OCR for scans and images (Step 11)
 │   ├── embeddings.py   # Gemini embeddings (Step 3)
 │   ├── vector_store.py # ChromaDB indexing and search (Step 3)
 │   ├── qa.py           # question answering with cited sources (Step 4)
@@ -221,6 +276,7 @@ enterprise-knowledge-assistant/
 ├── docker-compose.yml   # runs api + ui together (Step 9)
 ├── .env.example        # template for secrets
 ├── requirements.txt
+├── requirements-ocr.txt # optional OCR dependencies (Step 11)
 ├── LICENSE
 └── README.md
 ```
